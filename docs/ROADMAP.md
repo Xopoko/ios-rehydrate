@@ -13,7 +13,11 @@ because an implementation exists.
 - A clean checkout passes one synthetic suite run and the two-run comparison inside
   [EXPERIMENT.md](EXPERIMENT.md).
 
-**Current status:** public clean-checkout CI evidence is pending.
+**Current status:** Gate 1 is complete for
+[`011570b`](https://github.com/Xopoko/ios-rehydrate/commit/011570bfe6cc90f06e1cf6e5b57d937064754d1f).
+The [hosted clean-checkout CI run](https://github.com/Xopoko/ios-rehydrate/actions/runs/31367446584)
+passed all six Windows/Ubuntu and Python 3.11/3.12/3.13 jobs, including the fresh
+byte-for-byte artifact rebuild and smoke installation.
 
 ## Gate 2: Negative paths and mutation-boundary faults
 

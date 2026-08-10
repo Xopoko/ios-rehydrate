@@ -1,5 +1,7 @@
 # iOS Rehydrate
 
+[![CI](https://github.com/Xopoko/ios-rehydrate/actions/workflows/ci.yml/badge.svg)](https://github.com/Xopoko/ios-rehydrate/actions/workflows/ci.yml)
+
 `ios-rehydrate` is an experimental, Windows-first Python CLI for one narrow recovery
 workflow: inspect an app already represented on a connected iOS device, create and verify a
 fresh encrypted backup after requesting a full backup, validate a locally supplied IPA and its
