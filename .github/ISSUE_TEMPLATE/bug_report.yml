@@ -1,0 +1,76 @@
+name: Bug report
+description: Report a reproducible problem using synthetic data only.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve ios-rehydrate.
+
+        **Never attach or paste IPA files, device backups, logs, device identifiers, account names or details, credentials, secrets, authentication material, or screenshots.** Reproduce the problem with synthetic, self-created test data and describe that data's provenance.
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I have not included or linked any IPA, backup, log, identifier, account information, credential, secret, authentication material, or screenshot.
+          required: true
+        - label: I reproduced this issue using only synthetic, self-created test data.
+          required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the problem without including private or device-derived data.
+      placeholder: A concise description of the failure.
+    validations:
+      required: true
+
+  - type: textarea
+    id: synthetic-reproduction
+    attributes:
+      label: Synthetic reproduction
+      description: Give the smallest complete steps that reproduce the problem with synthetic data.
+      placeholder: |
+        1. Create ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: provenance
+    attributes:
+      label: Synthetic-data provenance
+      description: Explain how the test data was generated and why it contains no real app, device, backup, account, or user data.
+      placeholder: Generated locally from ...; no source material came from a device or account.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: ios-rehydrate version or commit
+      placeholder: 0.1.0 or a commit SHA
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Include only non-identifying details such as operating-system and Python versions.
+      placeholder: Windows 11, Python 3.13
+    validations:
+      required: true

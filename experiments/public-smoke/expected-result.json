@@ -1,0 +1,18 @@
+{
+  "experiment": "public-smoke-v1",
+  "fixture_sha256": "c793795704901848be0d46ba29a303f96d215369d0f297d4c427b329557c6c62",
+  "input_unchanged": true,
+  "repeat_equal": true,
+  "summary": {
+    "build": "1",
+    "bundle_ref": "bundle_3a901a73fb8d",
+    "has_code_resources": true,
+    "has_metadata": true,
+    "has_sinf": true,
+    "minimum_os": "16.0",
+    "sha256": "c793795704901848be0d46ba29a303f96d215369d0f297d4c427b329557c6c62",
+    "size": 1710,
+    "store_ref": "store_7c4941f444e3",
+    "version": "1.0"
+  }
+}

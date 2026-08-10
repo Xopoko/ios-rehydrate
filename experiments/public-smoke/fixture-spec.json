@@ -1,0 +1,9 @@
+{
+  "schema": "urn:ios-rehydrate:public-smoke-fixture:v1",
+  "generator": "scripts/run_public_experiment.py",
+  "format": "generated ZIP with one synthetic Payload app and synthetic metadata",
+  "contains_real_app_material": false,
+  "contains_device_or_account_data": false,
+  "committed_binary_fixture": false,
+  "purpose": "exercise deterministic IPA parser and redaction mechanics only"
+}

@@ -1,0 +1,96 @@
+[build-system]
+requires = ["hatchling==1.31.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ios-rehydrate"
+version = "0.1.0"
+description = "Safety-first CLI for rehydrating an iOS placeholder from a local IPA"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE", "NOTICE.md"]
+keywords = ["ios", "iphone", "ipa", "backup", "mobilebackup2"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Archiving :: Backup",
+  "Topic :: Utilities",
+]
+dependencies = [
+  "packaging>=24,<27",
+  "pyiosbackup==0.2.4",
+  "pymobiledevice3==10.7.1",
+  "rich>=14,<16",
+  "typer==0.27.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/Xopoko/ios-rehydrate"
+Repository = "https://github.com/Xopoko/ios-rehydrate"
+Issues = "https://github.com/Xopoko/ios-rehydrate/issues"
+
+[project.scripts]
+ios-rehydrate = "ios_rehydrate.cli:main"
+
+[dependency-groups]
+dev = [
+  "hatchling==1.31.0",
+  "mypy>=1.15,<2",
+  "pytest>=8.3,<10",
+  "pytest-cov>=6,<8",
+  "pytest-mock>=3.14,<4",
+  "ruff>=0.11,<1",
+]
+
+[tool.uv]
+required-version = "==0.8.13"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ios_rehydrate"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/.gitignore",
+  "/src",
+  "/tests",
+  "/docs",
+  "/scripts",
+  "/experiments",
+  "/README.md",
+  "/PRIVACY.md",
+  "/SECURITY.md",
+  "/CONTRIBUTING.md",
+  "/LICENSE",
+  "/NOTICE.md",
+  "/uv.lock",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "S", "RUF"]
+ignore = ["S101"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = [
+  "src/ios_rehydrate",
+  "scripts/check_public_surface.py",
+  "scripts/run_public_experiment.py",
+  "scripts/check_distributions.py",
+]
+warn_unused_ignores = true

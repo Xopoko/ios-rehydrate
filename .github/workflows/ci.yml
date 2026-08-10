@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.8.13"
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install locked dependencies
+        run: uv sync --locked --dev
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Type-check
+        run: uv run mypy
+
+      - name: Test
+        run: uv run pytest
+
+      - name: Reproduce public smoke experiment
+        run: uv run python scripts/run_public_experiment.py
+
+      - name: Check public repository surface
+        run: uv run python scripts/check_public_surface.py .
+
+      - name: Check exact Git index surface
+        run: uv run python scripts/check_public_surface.py --git-index .
+
+      - name: Require a clean committed snapshot
+        run: >-
+          uv run python -c
+          "import subprocess,sys; sys.exit(bool(subprocess.check_output(['git','status','--porcelain=v1','--untracked-files=all'])))"
+
+      - name: Build distributions
+        run: uv build --no-build-isolation
+
+      - name: Check wheel public surface
+        run: >-
+          uv run python scripts/check_public_surface.py
+          --archive dist/ios_rehydrate-0.1.0-py3-none-any.whl .
+
+      - name: Check source distribution public surface
+        run: >-
+          uv run python scripts/check_public_surface.py
+          --archive dist/ios_rehydrate-0.1.0.tar.gz .
+
+      - name: Verify and smoke-install built distributions
+        run: >-
+          uv run python scripts/check_distributions.py .
+          --smoke-install --rebuild-compare
+
+      - name: Recheck the committed snapshot
+        run: >-
+          uv run python -c
+          "import subprocess,sys; sys.exit(bool(subprocess.check_output(['git','status','--porcelain=v1','--untracked-files=all'])))"
