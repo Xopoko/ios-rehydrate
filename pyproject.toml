@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling==1.31.0"]
+requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -41,7 +41,7 @@ ios-rehydrate = "ios_rehydrate.cli:main"
 
 [dependency-groups]
 dev = [
-  "hatchling==1.31.0",
+  "hatchling==1.32.0",
   "mypy>=1.15,<2",
   "pytest>=8.3,<10",
   "pytest-cov>=6,<8",
