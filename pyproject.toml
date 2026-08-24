@@ -26,7 +26,7 @@ classifiers = [
 dependencies = [
   "packaging>=24,<27",
   "pyiosbackup==0.2.4",
-  "pymobiledevice3==10.7.1",
+  "pymobiledevice3==10.10.1",
   "rich>=14,<16",
   "typer==0.27.1",
 ]
