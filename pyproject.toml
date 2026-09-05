@@ -53,9 +53,11 @@ dev = [
 required-version = "==0.8.13"
 
 [tool.hatch.build.targets.wheel]
+core-metadata-version = "2.4"
 packages = ["src/ios_rehydrate"]
 
 [tool.hatch.build.targets.sdist]
+core-metadata-version = "2.4"
 include = [
   "/.gitignore",
   "/src",
