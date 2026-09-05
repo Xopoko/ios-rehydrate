@@ -6,7 +6,7 @@
 """Constrain pymobiledevice3's MobileBackup2 writes to one fresh local root.
 
 This module is a deliberately narrow compatibility boundary for
-``pymobiledevice3==10.7.1``.  That release's :class:`DeviceLink` joins paths
+``pymobiledevice3==11.1.6``, adapted originally from 10.7.1.  :class:`DeviceLink` joins paths
 supplied by the device directly onto a caller-provided directory.  We reuse its
 wire protocol and :class:`Mobilebackup2Service` orchestration, but replace every
 DeviceLink handler that reads or mutates the local filesystem.  Re-review this
@@ -36,13 +36,14 @@ import plistlib
 import shutil
 import stat
 import struct
+import sys
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from types import TracebackType
 from typing import Any, BinaryIO, NoReturn, cast
 
-from pymobiledevice3.exceptions import PyMobileDevice3Exception
+from pymobiledevice3.exceptions import NotEnoughDiskSpaceError, PyMobileDevice3Exception
 from pymobiledevice3.service_connection import ServiceConnection
 from pymobiledevice3.services.device_link import (
     APPLE_EPOCH,
@@ -57,6 +58,7 @@ from pymobiledevice3.services.device_link import (
     SIZE_FORMAT,
     DeviceLink,
     DLMessage,
+    _darwin_important_available_capacity,
 )
 from pymobiledevice3.services.mobilebackup2 import (
     BackupFilterCallback,
@@ -852,10 +854,21 @@ class SafeDeviceLink(DeviceLink):
         except Exception:
             _refuse(_TRANSFER_ERROR)
 
-    async def get_free_disk_space(self, message: DLMessage) -> None:
+    async def get_free_disk_space(self, _message: DLMessage) -> None:
         self._assert_root_identity()
-        await super().get_free_disk_space(message)
+        # Preserve the original capacity reply without upstream's raw-root debug log.
+        freespace = shutil.disk_usage(self.root_path).free
+        if sys.platform == "darwin":
+            important = _darwin_important_available_capacity(self.root_path)
+            if important is not None:
+                freespace = max(freespace, important)
+        await self.status_response(0, status_dict=freespace)
         self._assert_root_identity()
+
+    async def purge_disk_space(self, _message: DLMessage) -> None:
+        # Keep the reviewed fail-closed behavior; never log device-controlled details
+        # or continue after an unsupported request to free local disk space.
+        raise NotEnoughDiskSpaceError()
 
 
 class SafeMobilebackup2Service(Mobilebackup2Service):

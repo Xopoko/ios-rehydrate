@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import importlib.metadata
+import logging
 import plistlib
 import struct
 import warnings
 from collections import deque
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from pymobiledevice3.exceptions import NotEnoughDiskSpaceError
 from pymobiledevice3.services.device_link import (
     CODE_ERROR_REMOTE,
     CODE_FILE_DATA,
@@ -37,6 +40,7 @@ EXPECTED_FILESYSTEM_HANDLERS = {
     "DLMessageDownloadFiles": "download_files",
     "DLContentsOfDirectory": "contents_of_directory",
     "DLMessageCopyItem": "copy_item",
+    "DLMessagePurgeDiskSpace": "purge_disk_space",
 }
 
 
@@ -97,15 +101,77 @@ def test_boundary_matches_exact_pinned_upstream_handler_table(tmp_path: Path) ->
     root.mkdir()
     link = _link(root)
 
-    assert importlib.metadata.version("pymobiledevice3") == "10.7.1"
-    assert set(link._dl_handlers) == {
-        *EXPECTED_FILESYSTEM_HANDLERS,
-        "DLMessagePurgeDiskSpace",
-    }
+    assert importlib.metadata.version("pymobiledevice3") == "11.1.6"
+    assert set(link._dl_handlers) == set(EXPECTED_FILESYSTEM_HANDLERS)
     for command, method_name in EXPECTED_FILESYSTEM_HANDLERS.items():
         handler = link._dl_handlers[command]
         assert handler.__self__ is link
         assert handler.__func__ is getattr(SafeDeviceLink, method_name)
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "important_capacity", "expected_capacity"),
+    [
+        ("win32", None, 12345),
+        ("darwin", None, 12345),
+        ("darwin", 12000, 12345),
+        ("darwin", 15000, 15000),
+    ],
+)
+def test_free_space_reply_does_not_log_the_backup_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    platform_name: str,
+    important_capacity: int | None,
+    expected_capacity: int,
+) -> None:
+    root = tmp_path / LEAK_MARKER
+    root.mkdir()
+    wire = _Wire()
+    link = _link(root, wire)
+    monkeypatch.setattr(
+        safe_mobilebackup_module.shutil, "disk_usage", lambda _: SimpleNamespace(free=12345)
+    )
+    monkeypatch.setattr(safe_mobilebackup_module, "sys", SimpleNamespace(platform=platform_name))
+    monkeypatch.setattr(
+        safe_mobilebackup_module,
+        "_darwin_important_available_capacity",
+        lambda _: important_capacity,
+    )
+    caplog.set_level(logging.DEBUG, logger="pymobiledevice3.services.device_link")
+
+    asyncio.run(link._dl_handlers["DLMessageGetFreeDiskSpace"](["DLMessageGetFreeDiskSpace"]))
+
+    assert wire.sent_plists == [
+        ["DLMessageStatusResponse", 0, "___EmptyParameterString___", expected_capacity]
+    ]
+    assert LEAK_MARKER not in caplog.text
+    assert str(root) not in caplog.text
+
+
+@pytest.mark.parametrize("details", [[], [LEAK_MARKER, LEAK_MARKER]])
+def test_purge_request_fails_closed_without_logging_device_data(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, details: list[str]
+) -> None:
+    root = tmp_path / LEAK_MARKER
+    root.mkdir()
+    sentinel = root / "preserved"
+    sentinel.write_bytes(b"preserved")
+    wire = _Wire()
+    link = _link(root, wire)
+    caplog.set_level(logging.DEBUG, logger="pymobiledevice3.services.device_link")
+
+    with pytest.raises(NotEnoughDiskSpaceError) as error:
+        asyncio.run(
+            link._dl_handlers["DLMessagePurgeDiskSpace"](["DLMessagePurgeDiskSpace", *details])
+        )
+
+    assert sentinel.read_bytes() == b"preserved"
+    assert wire.sent_plists == []
+    assert LEAK_MARKER not in str(error.value)
+    assert LEAK_MARKER not in caplog.text
+    assert str(root) not in caplog.text
 
 
 @pytest.mark.parametrize(
