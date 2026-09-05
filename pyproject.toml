@@ -42,7 +42,7 @@ ios-rehydrate = "ios_rehydrate.cli:main"
 [dependency-groups]
 dev = [
   "hatchling==1.32.0",
-  "mypy>=1.15,<2",
+  "mypy>=1.15,<3",
   "pytest>=8.3,<10",
   "pytest-cov>=6,<8",
   "pytest-mock>=3.14,<4",
