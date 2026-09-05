@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling==1.31.0"]
+requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -41,7 +41,7 @@ ios-rehydrate = "ios_rehydrate.cli:main"
 
 [dependency-groups]
 dev = [
-  "hatchling==1.31.0",
+  "hatchling==1.32.0",
   "mypy>=1.15,<3",
   "pytest>=8.3,<10",
   "pytest-cov>=6,<8",
@@ -53,9 +53,11 @@ dev = [
 required-version = "==0.8.13"
 
 [tool.hatch.build.targets.wheel]
+core-metadata-version = "2.4"
 packages = ["src/ios_rehydrate"]
 
 [tool.hatch.build.targets.sdist]
+core-metadata-version = "2.4"
 include = [
   "/.gitignore",
   "/src",

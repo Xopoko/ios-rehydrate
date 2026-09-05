@@ -56,7 +56,7 @@ WINDOWS_REPARSE_ATTRIBUTE: Final = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT",
 CANONICAL_GZIP_HEADER: Final = bytes.fromhex("1f8b08000011365e02ff")
 CANONICAL_SDIST_MTIME: Final = 1_580_601_600
 EXPECTED_WHEEL_CONTROL: Final = (
-    b"Wheel-Version: 1.0\nGenerator: hatchling 1.31.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+    b"Wheel-Version: 1.0\nGenerator: hatchling 1.32.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
 )
 EXPECTED_PROJECT_URLS: Final = (
     ("Homepage", "https://github.com/Xopoko/ios-rehydrate"),
