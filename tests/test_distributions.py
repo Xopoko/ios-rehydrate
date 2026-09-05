@@ -61,7 +61,7 @@ PROJECT_URLS = (
 PRIVATE_PROJECT_URL = "https:" + "//private.invalid/project"
 CANONICAL_GZIP_MTIME = 1_580_601_600
 WHEEL_CONTROL = (
-    b"Wheel-Version: 1.0\nGenerator: hatchling 1.31.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+    b"Wheel-Version: 1.0\nGenerator: hatchling 1.32.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
 )
 
 
@@ -597,7 +597,7 @@ def test_wheel_generated_control_files_are_validated(
 @pytest.mark.parametrize(
     "wheel_control",
     [
-        WHEEL_CONTROL.replace(b"hatchling 1.31.0", b"hatchling 1.31.1"),
+        WHEEL_CONTROL.replace(b"hatchling 1.32.0", b"hatchling 1.32.1"),
         WHEEL_CONTROL + b"Author: Private Person\n",
         WHEEL_CONTROL + b"\nPrivate control body\n",
     ],
