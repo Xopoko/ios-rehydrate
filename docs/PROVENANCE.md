@@ -34,6 +34,23 @@ boundary above, it does not copy their source into this tree. Their GPL licenses
 with this repository's GPL-3.0-or-later license. See [`NOTICE.md`](../NOTICE.md) and the
 hash-locked `uv.lock` for dependency details.
 
+## Reviewed dependency update
+
+The current `pymobiledevice3` pin is
+[`11.1.6`](https://github.com/doronz88/pymobiledevice3/tree/a6bd794e0d8a202e74e5b533ec914cdb67b07889).
+The 2026-09-05 compatibility review compared its DeviceLink, MobileBackup2, InstallationProxy,
+lockdown, AFC, usbmux, and service-connection implementations against 10.7.1. MobileBackup2,
+InstallationProxy, and lockdown were unchanged. The existing synthetic protocol tests exercise
+the AFC and connection callers; no live-device compatibility is claimed.
+
+DeviceLink added raw backup-root logging to the free-space reply and changed purge requests
+from a terminal exception to a logged response that continues serving. The local boundary now
+owns both handlers. It preserves the prior capacity calculation and terminal purge exception,
+without logging the root or device-controlled purge details. Regression tests check the wire
+reply, macOS capacity fallback, untouched sentinel data, exception, log redaction, and that all
+filesystem handlers resolve to the local implementation. The original adaptation provenance
+above remains applicable.
+
 ## Evidence boundary
 
 Public tests generate synthetic structures from scratch. They validate parser, policy,
