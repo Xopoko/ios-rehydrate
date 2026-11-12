@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 iOS Rehydrate contributors
-"""Privacy-preserving identifiers and defensive error rendering."""
+"""Opaque references for identifiers, and scrubbing of error text."""
 
 from __future__ import annotations
 

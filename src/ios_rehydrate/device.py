@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 iOS Rehydrate contributors
-"""Explicit, USB-only device discovery and connection handling."""
+"""USB device discovery and lockdown connections."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ _USB_SERIAL = re.compile(r"(?:[0-9A-Fa-f]{40}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16})\Z"
 
 @dataclass(slots=True)
 class DeviceCloseStatus:
-    """Truthful, redacted status for best-effort local connection cleanup."""
+    """Set by ``open_device`` to whether the lockdown connection closed cleanly."""
 
     closed: bool = False
 
@@ -60,10 +60,6 @@ def _local_usbmux_address() -> str:
     )
 
 
-def _device_ref(serial: str) -> str:
-    return device_reference(serial)
-
-
 async def _usb_devices() -> list[MuxDevice]:
     """Return only usable USB records, without opening lockdown sessions."""
     try:
@@ -90,7 +86,7 @@ async def _usb_devices() -> list[MuxDevice]:
 async def list_devices() -> list[dict[str, str]]:
     """List connected USB devices using only opaque, deterministic references."""
     evidence = [
-        {"device_ref": _device_ref(device.serial), "connection_type": _CONNECTION_TYPE}
+        {"device_ref": device_reference(device.serial), "connection_type": _CONNECTION_TYPE}
         for device in await _usb_devices()
     ]
     return sorted(evidence, key=lambda item: item["device_ref"])
@@ -108,7 +104,7 @@ async def _resolve_device(selector: str) -> MuxDevice:
     matches: list[MuxDevice] = []
     for device in await _usb_devices():
         exact_serial = normalized == device.serial
-        exact_reference = normalized == _device_ref(device.serial)
+        exact_reference = normalized == device_reference(device.serial)
         if exact_serial or exact_reference:
             matches.append(device)
 

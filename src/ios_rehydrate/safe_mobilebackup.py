@@ -3,26 +3,17 @@
 # https://github.com/doronz88/pymobiledevice3/tree/6965e0d3fc24ea058f6da3bfb3fdc05eacb7ba6c
 # Copyright (C) pymobiledevice3 authors and contributors
 # Copyright (C) 2026 iOS Rehydrate contributors
-"""Constrain pymobiledevice3's MobileBackup2 writes to one fresh local root.
+"""Keep MobileBackup2's local filesystem writes inside one fresh backup root.
 
-This module is a deliberately narrow compatibility boundary for
-``pymobiledevice3==11.1.6``, adapted originally from 10.7.1.  :class:`DeviceLink` joins paths
-supplied by the device directly onto a caller-provided directory.  We reuse its
-wire protocol and :class:`Mobilebackup2Service` orchestration, but replace every
-DeviceLink handler that reads or mutates the local filesystem.  Re-review this
-subclass before changing the pinned dependency: the upstream handler table and
-method semantics are part of this boundary.
+Upstream ``DeviceLink`` joins device-supplied paths straight onto the backup
+directory. This subclass keeps its wire protocol and the ``Mobilebackup2Service``
+orchestration but replaces every handler that touches the local filesystem.
+Before each operation it rechecks the root's identity and ``lstat``s every
+existing ancestor and target; links and reparse points are never followed.
 
-This is a modified derivative of the pinned upstream ``services/device_link.py``
-and ``services/mobilebackup2.py`` implementation, not a clean-room rewrite.
-The 2026-08-09 modifications add fail-closed path confinement, bounded control
-and transfer parsing, redacted errors, explicit cleanup evidence, and tests for
-the exact inherited handler/protocol contract.  See ``docs/PROVENANCE.md``.
-
-The checks are lexical and fail closed.  Before each filesystem operation the
-fresh root's identity is checked, followed by ``lstat`` checks for every
-existing ancestor and target.  Links and Windows reparse points are never
-followed.  There is intentionally no override switch.
+Derived from pymobiledevice3's ``services/device_link.py`` and
+``services/mobilebackup2.py`` (see NOTICE.md) and written against
+``pymobiledevice3==11.1.6``. Re-review the handler table before bumping that pin.
 """
 
 from __future__ import annotations
@@ -65,7 +56,13 @@ from pymobiledevice3.services.mobilebackup2 import (
     Mobilebackup2Service,
 )
 
-_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+from ios_rehydrate.fs import (
+    WINDOWS_RESERVED_NAMES,
+    has_safe_directory_chain,
+    identity,
+    is_link_or_reparse,
+)
+
 _OPEN_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 _OPEN_BINARY = getattr(os, "O_BINARY", 0)
 _MAX_DEVICE_TEXT_BYTES = 4096
@@ -78,21 +75,6 @@ _SAFETY_ERROR = "mobile backup filesystem request refused"
 _TRANSFER_ERROR = "mobile backup transfer failed"
 _CLEANUP_ERROR = "mobile backup connection cleanup failed"
 _LOCAL_READ_ERROR = b"local read failed"
-_WINDOWS_RESERVED_NAMES = frozenset(
-    {
-        "CON",
-        "PRN",
-        "AUX",
-        "NUL",
-        "CLOCK$",
-        "CONIN$",
-        "CONOUT$",
-        *(f"COM{number}" for number in range(1, 10)),
-        *(f"LPT{number}" for number in range(1, 10)),
-        *(f"COM{number}" for number in "¹²³"),
-        *(f"LPT{number}" for number in "¹²³"),
-    }
-)
 _WINDOWS_INVALID_CHARACTERS = frozenset('*?"<>|')
 _ALLOWED_CONTROL_COMMANDS = frozenset(
     {
@@ -127,42 +109,17 @@ _MIN_CONTROL_ITEMS = {
 
 
 class MobileBackupSafetyError(PyMobileDevice3Exception):
-    """A constant, privacy-safe failure raised by the local path boundary."""
+    """Raised when the device asks for a filesystem operation we refuse."""
 
 
 def _refuse(message: str = _SAFETY_ERROR) -> NoReturn:
     raise MobileBackupSafetyError(message) from None
 
 
-def _is_reparse(metadata: os.stat_result) -> bool:
-    attributes = getattr(metadata, "st_file_attributes", 0)
-    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & _REPARSE_POINT)
-
-
-def _identity(metadata: os.stat_result) -> tuple[int, int]:
-    return metadata.st_dev, metadata.st_ino
-
-
 def _assert_safe_directory_chain(path: Path) -> Path:
-    """Return an absolute directory only if no component is a link/reparse point."""
-    try:
-        absolute = Path(os.path.abspath(path))
-        if not absolute.is_absolute() or not absolute.anchor:
-            _refuse()
-        current = Path(absolute.anchor)
-        metadata = os.lstat(current)
-        if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(metadata):
-            _refuse()
-        for component in absolute.parts[1:]:
-            current /= component
-            metadata = os.lstat(current)
-            if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(metadata):
-                _refuse()
-    except MobileBackupSafetyError:
-        raise
-    except (OSError, ValueError):
+    if not has_safe_directory_chain(path):
         _refuse()
-    return absolute
+    return Path(os.path.abspath(path))
 
 
 def _relative_parts(value: object) -> tuple[str, ...]:
@@ -186,7 +143,7 @@ def _relative_parts(value: object) -> tuple[str, ...]:
         if component.endswith((" ", ".")):
             _refuse()
         windows_stem = component.partition(".")[0].rstrip(" ").upper()
-        if windows_stem in _WINDOWS_RESERVED_NAMES:
+        if windows_stem in WINDOWS_RESERVED_NAMES:
             _refuse()
     return parts
 
@@ -213,14 +170,14 @@ class SafeDeviceLink(DeviceLink):
             _refuse()
         if (
             not stat.S_ISDIR(before.st_mode)
-            or _is_reparse(before)
+            or is_link_or_reparse(before)
             or not stat.S_ISDIR(resolved_metadata.st_mode)
-            or _is_reparse(resolved_metadata)
-            or _identity(before) != _identity(resolved_metadata)
+            or is_link_or_reparse(resolved_metadata)
+            or identity(before) != identity(resolved_metadata)
         ):
             _refuse()
         super().__init__(service, resolved, preserve_file, post_file_receive)
-        self._root_identity = _identity(resolved_metadata)
+        self._root_identity = identity(resolved_metadata)
 
     def _assert_root_identity(self) -> None:
         try:
@@ -229,8 +186,8 @@ class SafeDeviceLink(DeviceLink):
             _refuse()
         if (
             not stat.S_ISDIR(metadata.st_mode)
-            or _is_reparse(metadata)
-            or _identity(metadata) != self._root_identity
+            or is_link_or_reparse(metadata)
+            or identity(metadata) != self._root_identity
         ):
             _refuse()
 
@@ -254,7 +211,7 @@ class SafeDeviceLink(DeviceLink):
                     # fields; lstat on the enumerated spelling preserves the
                     # identity needed for the alias check.
                     observed = os.lstat(entry.path)
-                    if _is_reparse(observed) or _identity(observed) != _identity(expected):
+                    if is_link_or_reparse(observed) or identity(observed) != identity(expected):
                         _refuse()
                     return
         except MobileBackupSafetyError:
@@ -287,7 +244,7 @@ class SafeDeviceLink(DeviceLink):
                 continue
             except OSError:
                 _refuse()
-            if _is_reparse(metadata):
+            if is_link_or_reparse(metadata):
                 _refuse()
             self._assert_exact_existing_name(parent, component, metadata)
             if index < len(parts) - 1 and not stat.S_ISDIR(metadata.st_mode):
@@ -327,7 +284,7 @@ class SafeDeviceLink(DeviceLink):
             except OSError:
                 _refuse()
             inspected += 1
-            if inspected > _MAX_LOCAL_TREE_ENTRIES or _is_reparse(metadata):
+            if inspected > _MAX_LOCAL_TREE_ENTRIES or is_link_or_reparse(metadata):
                 _refuse()
             if stat.S_ISREG(metadata.st_mode):
                 continue
@@ -338,7 +295,9 @@ class SafeDeviceLink(DeviceLink):
                     for entry in entries:
                         entry_metadata = entry.stat(follow_symlinks=False)
                         inspected += 1
-                        if inspected > _MAX_LOCAL_TREE_ENTRIES or _is_reparse(entry_metadata):
+                        if inspected > _MAX_LOCAL_TREE_ENTRIES or is_link_or_reparse(
+                            entry_metadata
+                        ):
                             _refuse()
                         if stat.S_ISDIR(entry_metadata.st_mode):
                             pending.append(Path(entry.path))
@@ -365,9 +324,9 @@ class SafeDeviceLink(DeviceLink):
             self._assert_root_identity()
             if (
                 not stat.S_ISREG(opened.st_mode)
-                or _is_reparse(opened)
-                or _is_reparse(current)
-                or _identity(opened) != _identity(current)
+                or is_link_or_reparse(opened)
+                or is_link_or_reparse(current)
+                or identity(opened) != identity(current)
             ):
                 _refuse()
             return cast(BinaryIO, os.fdopen(descriptor, "rb"))
@@ -401,9 +360,9 @@ class SafeDeviceLink(DeviceLink):
             self._assert_root_identity()
             if (
                 not stat.S_ISREG(opened.st_mode)
-                or _is_reparse(opened)
-                or _is_reparse(current)
-                or _identity(opened) != _identity(current)
+                or is_link_or_reparse(opened)
+                or is_link_or_reparse(current)
+                or identity(opened) != identity(current)
             ):
                 _refuse()
             os.ftruncate(descriptor, 0)
@@ -508,7 +467,7 @@ class SafeDeviceLink(DeviceLink):
                     if inspected > _MAX_DIRECTORY_ENTRIES:
                         _refuse()
                     entry_metadata = entry.stat(follow_symlinks=False)
-                    if _is_reparse(entry_metadata):
+                    if is_link_or_reparse(entry_metadata):
                         _refuse()
                     if stat.S_ISDIR(entry_metadata.st_mode):
                         file_type = "DLFileTypeDirectory"
@@ -648,10 +607,10 @@ class SafeDeviceLink(DeviceLink):
                 destination, destination_metadata, _ = self._checked_path(destination_value)
                 if source_metadata is None:
                     _refuse()
-                source_identity = _identity(source_metadata)
+                source_identity = identity(source_metadata)
                 self._assert_tree_safe(source)
                 source, source_metadata, _ = self._checked_path(source_value)
-                if source_metadata is None or _identity(source_metadata) != source_identity:
+                if source_metadata is None or identity(source_metadata) != source_identity:
                     _refuse()
                 destination, destination_metadata, _ = self._checked_path(destination_value)
                 if destination_metadata is not None and not (
@@ -692,7 +651,7 @@ class SafeDeviceLink(DeviceLink):
                 return
             if source_metadata is None:
                 _refuse()
-            original_source_identity = _identity(source_metadata)
+            original_source_identity = identity(source_metadata)
 
             destination, destination_metadata, destination_parts = self._checked_path(message[2])
             self._ensure_parent(destination_parts)
@@ -709,10 +668,10 @@ class SafeDeviceLink(DeviceLink):
                 destination, destination_metadata, _ = self._checked_path(message[2])
                 if source_metadata is None or destination_metadata is not None:
                     _refuse()
-                source_identity = _identity(source_metadata)
+                source_identity = identity(source_metadata)
                 self._assert_tree_safe(source)
                 source, source_metadata, _ = self._checked_path(message[1])
-                if source_metadata is None or _identity(source_metadata) != source_identity:
+                if source_metadata is None or identity(source_metadata) != source_identity:
                     _refuse()
                 destination, destination_metadata, _ = self._checked_path(message[2])
                 if destination_metadata is not None:
@@ -729,7 +688,7 @@ class SafeDeviceLink(DeviceLink):
                 if (
                     source_metadata is None
                     or not stat.S_ISREG(source_metadata.st_mode)
-                    or _identity(source_metadata) != original_source_identity
+                    or identity(source_metadata) != original_source_identity
                 ):
                     _refuse()
                 destination, destination_metadata, _ = self._checked_path(message[2])
@@ -770,10 +729,10 @@ class SafeDeviceLink(DeviceLink):
                     if metadata is None:
                         _refuse()
                     is_directory = stat.S_ISDIR(metadata.st_mode)
-                    target_identity = _identity(metadata)
+                    target_identity = identity(metadata)
                     self._assert_tree_safe(path)
                     path, metadata, _ = self._checked_path(value)
-                    if metadata is None or _identity(metadata) != target_identity:
+                    if metadata is None or identity(metadata) != target_identity:
                         _refuse()
                     is_directory = stat.S_ISDIR(metadata.st_mode)
                     if is_directory:

@@ -1,180 +1,66 @@
 # Architecture
 
-## Purpose
+## Modules
 
-iOS Rehydrate separates inspection, evidence gathering, policy, and the single permitted
-mutation. “Rehydrate” has a narrow technical meaning here: stage the exact locally supplied,
-validated IPA bytes and invoke InstallationProxy `Upgrade` for an existing `User` placeholder
-or demoted target. It does not mean source recovery, backup restore, a new install, guaranteed
-launchability, or guaranteed data preservation.
+| Module | Role |
+| ------ | ---- |
+| `cli.py` | Typer commands, receipt gates, the `rehydrate` confirmation, error → exit-code mapping |
+| `device.py` | USB-only device discovery and lockdown sessions (local usbmux, no autopair, throwaway pairing cache) |
+| `apps.py` | InstallationProxy lookup of one bundle ID → `AppSnapshot`; `is_rehydratable()` |
+| `backup.py` | Read/enable backup encryption, run a full backup into a new directory, structurally validate it |
+| `safe_mobilebackup.py` | `DeviceLink` subclass that confines every device-requested file operation to the backup root |
+| `manifest.py` | Validate the keybag, decrypt `Manifest.db` in memory, count the app's domain entries |
+| `ipa.py` | Parse and validate the IPA (raw ZIP preflight, then `zipfile`), extract metadata and SINF |
+| `upgrade.py` | Stage the IPA over AFC, re-check eligibility, send `Upgrade`, post-check, clean up staging |
+| `receipts.py` | Exclusive-create JSON receipts and the reader that enforces version, kind, and age |
+| `privacy.py` | Hashed references (`device_…`, `app_…`) and scrubbing of paths/UDIDs/emails from error text |
+| `fs.py` | Shared no-follow helpers: link/reparse detection, safe directory chains, reserved Windows names |
 
-## Data flow
+## Rehydrate flow
 
-```text
-operator inputs
-    |
-    v
-CLI and redacted presentation
-    |---------------------> receipt writer (new files only)
-    |
-    +--> device selector --> app inspector ---------+
-    |                                                |
-    +--> backup encryption/create/verify adapters    +--> policy gate
-    |                                                |
-    +--> local-file IPA reader --> structural verifier
-                                                     |
-                                                     v
-                                      explicit `rehydrate` confirmation
-                                                     |
-                                                     v
-                               exact-byte staging --> InstallationProxy Upgrade
-                                                     |
-                                                     v
-                                           bounded post-inspection/result
-```
+1. The IPA is validated with the same checks as `ipa verify`. The validated bytes are kept in
+   memory, and those exact bytes are what get staged.
+2. The device is opened and the `backup-verification` receipt is checked against the device
+   and app. That receipt in turn embeds the SHA-256 of the `backup-create` receipt it was checked
+   against.
+3. The app must be `User` + placeholder/demoted. The operator types `rehydrate`.
+4. The IPA is written to `/PublicStaging/ios-rehydrate/<random>.ipa`.
+5. The app is inspected again (staging can take a while); it must still be eligible. The backup
+   receipt is re-read and must be byte-identical.
+6. `Upgrade` is sent. From here on any error, timeout, or interrupt is reported as
+   *outcome unknown* (exit 52) and never retried.
+7. One shielded, time-limited attempt removes the staged file.
+8. Up to three post-checks confirm the app is installed with the IPA's version and build.
 
-## Components
+## Invariants
 
-### CLI and privacy boundary
+- The source IPA is never modified.
+- Backups and receipts only go to new paths; nothing is overwritten. A partial backup is kept.
+- Backup encryption is never disabled and its password never changed.
+- The only mutation is `Upgrade` for an eligible existing app. No `Install`, `Uninstall`,
+  force flag, or retry.
+- Anything uncertain before `Upgrade` is a refusal; anything uncertain after it is "unknown".
+- Normal output and receipts contain no raw UDIDs, bundle IDs, or paths.
+- A failure while closing a connection or writing a receipt is reported separately and never
+  hides an already-known result.
 
-The Typer CLI parses explicit selectors, maps expected failures to stable exit behavior, and
-renders bounded pretty or compact-JSON success output plus sanitized line-oriented failures. Raw device identifiers, app identifiers, account data,
-full paths, unrelated app inventory, and raw lower-level errors do not belong in normal output
-or receipts.
+## Untrusted inputs and how they are handled
 
-### Device adapter
+| Input | Handling | What remains |
+| ----- | -------- | ------------ |
+| IPA | Size/entry/ratio caps; EOCD, ZIP64, and every central/local header are cross-checked before `zipfile` sees the data so both parsers agree; traversal, duplicate, case-collision, and link entries rejected | Parser bugs; Apple can still reject a structurally valid package |
+| Device file requests during backup | Strict relative paths, no aliases or DOS device names, root identity re-checked and no-follow `lstat` of every component before each operation | Same-user or privileged processes racing the checks |
+| DeviceLink protocol | Length-prefixed messages capped before parsing; only known commands accepted | `pymobiledevice3` builds the initial `Info.plist` without a size cap |
+| Backup on disk | Plist and `Manifest.db` size caps; keybag TLV shape and PBKDF iteration counts validated *before* asking for the password; SQLite opened read-only from memory | Up to 512 MiB held in memory, possibly more than once |
+| Receipts | Exact schema/version, timezone-aware timestamp under 24 h old, device/app/digest chain checked | Not signed; anyone with write access to the files can forge them |
+| Device app state | Checked before confirmation, again before staging, and again right before `Upgrade` | Can still change after the final check |
 
-`pymobiledevice3==10.7.1` provides local USB device discovery, lockdown services, app inspection,
-staging, and InstallationProxy access. Device-bound commands never choose a sole connected
-device implicitly: the operator supplies a redacted device reference or full UDID, and the
-selector must resolve exactly. Untrusted mux serials must match a bounded legacy or modern UDID
-grammar before they can reach pairing-record lookup. Discovery and connection calls receive an
-explicit platform-local mux address, ignoring environment-selected remote mux endpoints.
-Automatic pairing is disabled. The adapter supplies an ephemeral pairing-cache directory so the
-dependency does not create its normal persistent project cache; the dependency may still read an
-existing pairing record from usbmux/iTunes. Session-close failure is reported separately and
-cannot erase an already determined operation result or classified body failure.
+`pyiosbackup` logs derived key material at DEBUG level. Its logger is disabled, under a lock,
+around keybag construction.
 
-### Backup subsystem
+## Dependencies
 
-The subsystem reads the device's backup-encryption state, can enable encryption through a
-hidden double-entry password prompt, requests a fresh full backup in a new directory, and
-verifies the resulting metadata, device binding, encrypted state, completion state, manifest
-structure, and nonempty hashed payload. It records the full-backup request separately from the
-observed final status. It never disables encryption, changes an existing encryption password,
-recovers a password, or restores a backup.
-
-The pinned MobileBackup2 dependency's generic `DeviceLink` filesystem handlers are replaced for
-this workflow by a first-party boundary with an asserted handler table. Every device-controlled
-path must be one bounded, unambiguous relative path beneath a fresh root. Before create, open,
-truncate, read, copy, move, remove, or enumerate, the boundary rechecks root identity and all
-existing components with no-follow metadata and rejects links/reparse points. Encryption changes
-receive their own fresh private scratch root instead of the operator's existing parent. Generic
-bounded errors replace dependency warnings containing device-controlled names or text. Incoming
-DeviceLink control plists are length-prefixed, bounded before read/parse, and restricted to the
-known pinned command set. Case/short-name aliases and Windows DOS device components fail closed;
-directory responses and direct handler iterables are capped. A changed or nonempty scratch is
-preserved instead of recursively deleted, and that cleanup result is exposed separately from
-the proved encryption state.
-
-`pyiosbackup==0.2.4` and the device adapters provide the encrypted-backup mechanics. Backup
-content and passwords stay outside public output. Before decrypting, v0.1 caps the encrypted
-manifest database at 512 MiB; it also bounds plist sizes, per-entry metadata, app-domain entry
-count, and declared logical size. Before prompting for a password or invoking PBKDF, a first-party
-parser bounds and validates the keybag TLV, required root/class fields, salts, wrapped keys,
-manifest-key/class match, and iteration counts. The exact dependency logger that can reveal
-derived key material at debug level is suppressed and restored under a lock around keybag
-construction. Directory validation streams entries and caps both inspected entries and hashed
-payload count. These are fail-closed safety limits, not compatibility claims.
-
-`pymobiledevice3` still constructs initial backup factory information before the bounded
-DeviceLink loop by materializing InstallationProxy app metadata/icons and AFC iTunes/iBooks
-files. v0.1 does not replace that dependency path and therefore does not establish aggregate
-memory isolation from a compromised device. This residual is kept explicit rather than hidden
-behind the later `Info.plist` size check.
-
-### IPA verifier
-
-The verifier opens the source local file read-only, computes bounded evidence, rejects unsafe
-or ambiguous ZIP structure, requires one root app bundle, parses its metadata, and checks the
-workflow-required metadata plus any requested identity/store constraints. It does not
-authenticate provenance, cryptographic signature validity, or Mach-O encryption state. It
-neither decrypts nor rewrites the archive. Before constructing `ZipFile`, a first-party preflight
-validates the bounded EOCD or ZIP64 records, exact single-disk central-directory placement,
-physical header count, declared entry count, directory size, and compression methods. It then
-cross-checks every central entry against its local header and bounded raw payload range. Only
-stored and deflated members pass; raw decoding must reach exact EOF with the declared size and
-CRC, without trailing compressed bytes. Path, namespace/member-type, expansion, ratio,
-duplicate, and canonical-collision checks remain in the post-construction verifier.
-
-### Policy gate and rehydrate executor
-
-The executor checks that the bundle match is exact and that a fresh matching
-encrypted-backup/app-domain receipt is present. That receipt is itself bound to a fresh
-`backup create` receipt from the same CLI version, including the original full-backup request
-and current backup aggregates. It then requires `ApplicationType` `User`, a placeholder or
-demoted app, and the literal confirmation `rehydrate` before staging the exact validated bytes.
-Because app
-state can change during a long upload, the executor performs a second bounded inspection after
-staging and immediately before the mutation boundary. Only another exact eligible result permits
-the single InstallationProxy `Upgrade` verb. The final pre-send snapshot is the one recorded as
-the operation's `before` evidence. The receipt is a local guardrail, not a signed attestation.
-There is no `Install`, `Uninstall`, force, automatic retry, or fallback path.
-
-A terminal response and bounded-attempt, bounded-time post-inspection distinguish known success,
-known failure, and unknown outcome. After the mutation boundary, a disconnect, cancellation,
-interrupt, or timeout is not treated as safe failure and is never retried automatically. The
-executor makes one shielded, bounded attempt to remove only its randomly named staged IPA. The
-result records whether cleanup was confirmed; failure can leave a full or partial staged copy
-on the device without changing the separately determined app outcome.
-
-Backup operations apply the same truth rule to their inner protocol sessions. A completed backup
-is structurally validated even when MobileBackup2 disconnect/close cannot be confirmed; the
-report carries `mobilebackup_connection_closed` separately. Encryption-enable cleanup status is
-reported separately when that operation ran.
-
-### Evidence writer
-
-Optional JSON receipts contain redacted, minimal facts. Their paths are atomically reserved with
-no-overwrite semantics before device access or other operation work. A pre-operation failure
-removes only an unchanged reservation. Once the Upgrade send boundary is crossed, an unknown
-outcome is finalized as explicit redacted evidence when possible instead of leaving a pristine
-empty reservation. A finalization failure cannot turn a known successful operation into a false
-operation failure. Read safety-gate receipts require the current schema/tool version, a valid
-timezone-aware timestamp, and a maximum age of 24 hours. Timestamps, opaque references, hashes,
-aggregate counts/sizes, and platform
-responses can vary across runs; policy decisions and normalized synthetic-test expectations are
-intended to be deterministic for the same inputs.
-
-## Read and write surfaces
-
-The CLI reads the selected IPA, device protocol responses, an existing system/usbmux pairing
-record, and an operator-selected backup when verifying. It writes only a new backup directory,
-explicitly requested new receipt files, an ephemeral pairing-cache directory, and bounded
-staging required by the device protocol. Ephemeral cache and staging removal are best-effort;
-their residual data risks are documented in the privacy and threat-model documents. The CLI
-does not modify the source IPA. Backup creation routes device-requested filesystem work through
-the contained MobileBackup2 boundary; no-follow checks and identity rechecks fail closed on
-known link/reparse/root-replacement cases, but cannot make host-level concurrent filesystem
-interference impossible.
-
-The implementation has no Apple account, store, acquisition, telemetry, or project-hosted
-service client. Its adapter supplies an explicit platform-local usbmux address rather than an
-environment-selected remote endpoint. Source checkout, dependency installation, the host, or
-the device can still have separate network behavior; the architecture therefore makes no
-blanket offline claim.
-
-The runtime workflow uses Python library APIs directly; it does not construct shell command
-strings or delegate the device/IPA operation to an external executable.
-
-## Extension seam
-
-The architecture may retain an internal `ArtifactProvider` seam whose v0.1 implementation is
-local-file-only. No external or acquiring provider is part of v0.1. Any future provider requires
-an independent security review before implementation or activation and must not receive device
-mutation privileges, bypass the verifier/policy gate, or weaken the anti-scope.
-
-## Dependency and license boundary
-
-Both pinned device/backup dependencies, `pymobiledevice3` and `pyiosbackup`, are GPL-licensed.
-The project is consequently distributed under GPL-3.0-or-later; see [../NOTICE.md](../NOTICE.md).
+`pymobiledevice3` and `pyiosbackup` are pinned exactly because `safe_mobilebackup.py` overrides
+`DeviceLink` internals and `manifest.py` relies on `pyiosbackup`'s behavior. When bumping
+`pymobiledevice3`, diff `services/device_link.py` and `services/mobilebackup2.py` against the
+previous version, and update the handler-parity tests in `tests/test_safe_mobilebackup.py`.

@@ -2,8 +2,7 @@
 # Copyright (C) 2026 iOS Rehydrate contributors
 """Create and structurally verify encrypted MobileBackup2 backups.
 
-Only opaque references and aggregate values leave this module.  In particular,
-``BackupReport`` never contains the backup path or a device identifier.
+``BackupReport`` holds only opaque references and aggregates, never paths or UDIDs.
 """
 
 from __future__ import annotations
@@ -20,27 +19,21 @@ from pathlib import Path
 from typing import Any
 
 from ios_rehydrate.errors import ExitCode, RehydrateError
+from ios_rehydrate.fs import has_safe_directory_chain, identity, is_link_or_reparse
+from ios_rehydrate.manifest import MAX_MANIFEST_DB_BYTES, MAX_MANIFEST_PLIST_BYTES
 from ios_rehydrate.privacy import device_reference, opaque_ref
 from ios_rehydrate.safe_mobilebackup import SafeMobilebackup2Service as Mobilebackup2Service
 
 _BACKUP_DOMAIN = "com.apple.mobile.backup"
 _WILL_ENCRYPT_KEY = "WillEncrypt"
 _HASHED_PAYLOAD = re.compile(r"^[0-9a-fA-F]{40}$")
-_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 ENCRYPTION_REQUEST_TIMEOUT_SECONDS = 120.0
 ENCRYPTION_RECONCILE_TIMEOUT_SECONDS = 10.0
 MOBILEBACKUP_CLEANUP_TIMEOUT_SECONDS = 5.0
 
-# These are intentionally generous compared with ordinary plist metadata while
-# still bounding parser memory for an untrusted backup.  Info.plist contains app
-# metadata and icons, so it receives the largest plist allowance.
+# Info.plist carries app metadata and icons, hence the larger allowance.
 MAX_INFO_PLIST_BYTES = 64 * 1024 * 1024
-MAX_MANIFEST_PLIST_BYTES = 4 * 1024 * 1024
 MAX_STATUS_PLIST_BYTES = 1024 * 1024
-
-# Manifest.db is only structurally sized here (never loaded); the same ceiling
-# bounds the in-memory encrypted-manifest probe in manifest.py.
-MAX_MANIFEST_DB_BYTES = 512 * 1024 * 1024
 MAX_INSPECTED_DIRECTORY_ENTRIES = 2_000_000
 MAX_HASHED_PAYLOAD_COUNT = 1_000_000
 _PLIST_LIMITS = {
@@ -72,7 +65,7 @@ class _PrivateScratch:
 
 @dataclass(frozen=True, slots=True)
 class BackupReport:
-    """Privacy-safe evidence that a backup passed structural validation."""
+    """Result of a successful structural backup check."""
 
     backup_ref: str
     device_ref: str
@@ -85,24 +78,22 @@ class BackupReport:
     mobilebackup_connection_closed: bool | None = None
 
     def as_public_dict(self) -> dict[str, str | int | bool | None]:
-        """Return the complete report as a JSON-safe, privacy-safe mapping."""
         return asdict(self)
 
 
 @dataclass(frozen=True, slots=True)
 class EncryptionEnableReport:
-    """Truthful cleanup evidence for one successful enable request."""
+    """Cleanup status after encryption was enabled."""
 
     mobilebackup_connection_closed: bool
     scratch_removed: bool
 
 
 async def encryption_status(lockdown: Any) -> bool:
-    """Read the authoritative backup-encryption boolean from lockdownd.
+    """Read ``WillEncrypt`` from lockdownd.
 
-    pymobiledevice3's convenience method intentionally maps read failures to
-    ``False``.  That is unsafe for an enable-only flow, so this function queries
-    the canonical domain/key directly and refuses absent or non-boolean values.
+    pymobiledevice3's helper turns read errors into ``False``, which would look
+    like "encryption disabled", so query the key directly and reject non-bools.
     """
     try:
         value = await lockdown.get_value(_BACKUP_DOMAIN, _WILL_ENCRYPT_KEY)
@@ -126,13 +117,10 @@ async def enable_encryption(
     backup_root: Path,
     password_provider: Callable[[], tuple[str, str]],
 ) -> EncryptionEnableReport | None:
-    """Enable backup encryption without ever disabling or changing a password.
+    """Enable backup encryption. Never disables it or changes an existing password.
 
-    ``password_provider`` is injected by the caller so a CLI can use hidden
-    double-entry prompts.  It is deliberately not invoked when encryption is
-    already enabled.  The state is queried again immediately before mutation;
-    if it changed while the password was being collected, the operation is
-    refused.
+    ``password_provider`` is only called when encryption is off, and the state is
+    re-read after the prompt so a concurrent change is refused.
     """
     if await encryption_status(lockdown):
         return None
@@ -224,12 +212,9 @@ async def create_backup(
     output_root: Path,
     progress: Callable[[float], None] | None = None,
 ) -> BackupReport:
-    """Request a fresh full backup, preserve failures, and validate the result.
+    """Request a full backup into a new ``output_root`` and validate the result.
 
-    The existing parent directory is checked first and ``output_root`` is then
-    reserved with one non-recursive ``mkdir`` call.  No failure path deletes or
-    truncates the reserved directory, so partial evidence remains available for
-    recovery or diagnosis.
+    A partial backup is left in place on failure.
     """
     expected_udid = getattr(lockdown, "udid", None)
     if not isinstance(expected_udid, str) or not _is_single_component(expected_udid):
@@ -400,13 +385,13 @@ def _reserve_private_scratch(parent: Path) -> _PrivateScratch:
             reason="BACKUP_SCRATCH_CREATE_FAILED",
         ) from exc
     if (
-        _is_reparse(before)
-        or _is_reparse(after)
-        or _is_reparse(scratch_metadata)
+        is_link_or_reparse(before)
+        or is_link_or_reparse(after)
+        or is_link_or_reparse(scratch_metadata)
         or not stat.S_ISDIR(before.st_mode)
         or not stat.S_ISDIR(after.st_mode)
         or not stat.S_ISDIR(scratch_metadata.st_mode)
-        or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+        or identity(before) != identity(after)
         or scratch.parent != parent
     ):
         raise RehydrateError(
@@ -414,7 +399,7 @@ def _reserve_private_scratch(parent: Path) -> _PrivateScratch:
             code=ExitCode.POLICY_REFUSED,
             reason="BACKUP_SCRATCH_UNSAFE",
         )
-    return _PrivateScratch(scratch, (scratch_metadata.st_dev, scratch_metadata.st_ino))
+    return _PrivateScratch(scratch, identity(scratch_metadata))
 
 
 def _remove_empty_private_scratch(scratch: _PrivateScratch) -> bool:
@@ -423,8 +408,8 @@ def _remove_empty_private_scratch(scratch: _PrivateScratch) -> bool:
         metadata = os.lstat(scratch.path)
         if (
             stat.S_ISDIR(metadata.st_mode)
-            and not _is_reparse(metadata)
-            and (metadata.st_dev, metadata.st_ino) == scratch.identity
+            and not is_link_or_reparse(metadata)
+            and identity(metadata) == scratch.identity
         ):
             scratch.path.rmdir()
         else:
@@ -494,7 +479,7 @@ def _reserve_output_root(output_root: Path) -> Path:
             code=ExitCode.IO,
             reason="BACKUP_OUTPUT_CREATE_FAILED",
         ) from exc
-    if not _has_safe_directory_chain(target):
+    if not has_safe_directory_chain(target):
         raise RehydrateError(
             "backup output or one of its ancestors is a link or reparse point",
             code=ExitCode.POLICY_REFUSED,
@@ -505,7 +490,7 @@ def _reserve_output_root(output_root: Path) -> Path:
 
 def _safe_existing_directory(path: Path, *, reason: str) -> Path:
     raw = Path(path)
-    if not _has_safe_directory_chain(raw):
+    if not has_safe_directory_chain(raw):
         code = ExitCode.BACKUP_VERIFY if reason.startswith("BACKUP_LAYOUT") else ExitCode.IO
         raise RehydrateError("backup directory is missing or unsafe", code=code, reason=reason)
     try:
@@ -517,41 +502,12 @@ def _safe_existing_directory(path: Path, *, reason: str) -> Path:
         ) from exc
 
 
-def _has_safe_directory_chain(path: Path) -> bool:
-    """Check every existing component from the filesystem anchor without following links."""
-    try:
-        absolute = Path(os.path.abspath(path))
-        if not absolute.is_absolute() or not absolute.anchor:
-            return False
-        current = Path(absolute.anchor)
-        components = absolute.parts[1:]
-        metadata = os.lstat(current)
-        if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(metadata):
-            return False
-        for component in components:
-            current /= component
-            metadata = os.lstat(current)
-            if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(metadata):
-                return False
-    except (OSError, ValueError):
-        return False
-    return True
-
-
-def _is_safe_directory(path: Path) -> bool:
-    try:
-        metadata = os.lstat(path)
-    except OSError:
-        return False
-    return stat.S_ISDIR(metadata.st_mode) and not _is_reparse(metadata)
-
-
 def _regular_file_metadata(path: Path) -> os.stat_result | None:
     try:
         metadata = os.lstat(path)
     except OSError:
         return None
-    if not stat.S_ISREG(metadata.st_mode) or _is_reparse(metadata):
+    if not stat.S_ISREG(metadata.st_mode) or is_link_or_reparse(metadata):
         return None
     return metadata
 
@@ -561,7 +517,11 @@ def _read_bounded_metadata(path: Path, size_limit: int) -> bytes:
     try:
         with path.open("rb") as stream:
             opened = os.fstat(stream.fileno())
-            if not stat.S_ISREG(opened.st_mode) or _is_reparse(opened) or opened.st_size <= 0:
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or is_link_or_reparse(opened)
+                or opened.st_size <= 0
+            ):
                 raise _verify_error(
                     "required backup metadata is unsafe or empty",
                     "BACKUP_METADATA_INVALID",
@@ -583,11 +543,6 @@ def _read_bounded_metadata(path: Path, size_limit: int) -> bytes:
     if len(data) > size_limit:
         raise _verify_error("backup plist metadata is too large", "BACKUP_METADATA_TOO_LARGE")
     return data
-
-
-def _is_reparse(metadata: os.stat_result) -> bool:
-    attributes = getattr(metadata, "st_file_attributes", 0)
-    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & _REPARSE_POINT)
 
 
 def _is_single_component(value: str) -> bool:
@@ -641,7 +596,7 @@ def _exact_device_directory(root: Path, expected_udid: str, budget: _DirectoryEn
                         "BACKUP_LAYOUT_INVALID",
                     )
                 metadata = entry.stat(follow_symlinks=False)
-                if _is_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
+                if is_link_or_reparse(metadata) or not stat.S_ISDIR(metadata.st_mode):
                     raise _verify_error(
                         "backup device directory is unsafe",
                         "BACKUP_LAYOUT_INVALID",
@@ -681,7 +636,7 @@ def _hashed_payload_totals(device_root: Path, budget: _DirectoryEntryBudget) -> 
                 raise _verify_error(
                     "backup payload metadata is unreadable", "BACKUP_PAYLOAD_INVALID"
                 ) from exc
-            if _is_reparse(bucket_metadata) or not stat.S_ISDIR(bucket_metadata.st_mode):
+            if is_link_or_reparse(bucket_metadata) or not stat.S_ISDIR(bucket_metadata.st_mode):
                 raise _verify_error(
                     "backup contains an unsafe payload bucket", "BACKUP_PAYLOAD_INVALID"
                 )
@@ -701,7 +656,7 @@ def _hashed_payload_totals(device_root: Path, budget: _DirectoryEntryBudget) -> 
                             "backup payload metadata is unreadable",
                             "BACKUP_PAYLOAD_INVALID",
                         ) from exc
-                    if _is_reparse(metadata):
+                    if is_link_or_reparse(metadata):
                         raise _verify_error(
                             "backup contains an unsafe link", "BACKUP_PAYLOAD_INVALID"
                         )

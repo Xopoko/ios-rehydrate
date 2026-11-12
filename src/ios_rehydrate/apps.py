@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 iOS Rehydrate contributors
-"""Redacted, fail-closed inspection of the runtime application database."""
+"""Look up one app on the device via InstallationProxy."""
 
 from __future__ import annotations
 
@@ -30,8 +30,6 @@ _RETURN_ATTRIBUTES = [
 
 
 class AppState(StrEnum):
-    """Policy-relevant application states reported by installation proxy."""
-
     ABSENT = "ABSENT"
     PLACEHOLDER = "PLACEHOLDER"
     INSTALLED = "INSTALLED"
@@ -41,7 +39,7 @@ class AppState(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class AppSnapshot:
-    """The complete, intentionally redacted public application evidence."""
+    """What we report about an app; the bundle ID only appears as ``app_ref``."""
 
     app_ref: str
     state: AppState
@@ -61,6 +59,11 @@ class AppSnapshot:
             "demoted": self.demoted,
             "sizes": dict(self.sizes),
         }
+
+
+def is_rehydratable(snapshot: AppSnapshot) -> bool:
+    """True for a User app that is currently a placeholder or demoted."""
+    return snapshot.state is AppState.PLACEHOLDER and (snapshot.placeholder or snapshot.demoted)
 
 
 def _empty_snapshot(bundle_identifier: str, state: AppState) -> AppSnapshot:

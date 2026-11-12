@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 iOS Rehydrate contributors
-"""Minimal, redacted, no-overwrite JSON receipts."""
+"""JSON receipts that chain the backup -> verify -> rehydrate steps together."""
 
 from __future__ import annotations
 
@@ -15,32 +15,18 @@ from typing import Any
 
 from ios_rehydrate import __version__
 from ios_rehydrate.errors import ExitCode, RehydrateError
+from ios_rehydrate.fs import (
+    WINDOWS_RESERVED_NAMES,
+    has_safe_directory_chain,
+    identity,
+    is_link_or_reparse,
+)
 
 SCHEMA = "urn:ios-rehydrate:receipt:v1"
 MAX_RECEIPT_BYTES = 1024 * 1024
 MAX_RECEIPT_AGE = timedelta(hours=24)
 MAX_RECEIPT_FUTURE_SKEW = timedelta(minutes=5)
-_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _WINDOWS_INVALID_LEAF_CHARACTERS = frozenset('<>:"/\\|?*')
-_WINDOWS_RESERVED_NAMES = frozenset(
-    {
-        "CON",
-        "PRN",
-        "AUX",
-        "NUL",
-        "CLOCK$",
-        "CONIN$",
-        "CONOUT$",
-        *(f"COM{number}" for number in range(1, 10)),
-        *(f"LPT{number}" for number in range(1, 10)),
-        "COM¹",
-        "COM²",
-        "COM³",
-        "LPT¹",
-        "LPT²",
-        "LPT³",
-    }
-)
 
 
 class ReceiptReservation:
@@ -50,7 +36,7 @@ class ReceiptReservation:
         self.path = path
         self._descriptor: int | None = descriptor
         metadata = os.fstat(descriptor)
-        self._identity = (metadata.st_dev, metadata.st_ino)
+        self._identity = identity(metadata)
         self._operation_started = False
         self._committed = False
 
@@ -147,14 +133,13 @@ class ReceiptReservation:
                 reason="RECEIPT_RESERVATION_INVALID",
             )
         metadata = os.fstat(descriptor)
-        attributes = getattr(metadata, "st_file_attributes", 0)
         size_valid = (not empty or metadata.st_size == 0) and (
             expected_size is None or metadata.st_size == expected_size
         )
         if (
-            (metadata.st_dev, metadata.st_ino) != self._identity
+            identity(metadata) != self._identity
             or not stat.S_ISREG(metadata.st_mode)
-            or bool(attributes & _REPARSE_POINT)
+            or is_link_or_reparse(metadata)
             or metadata.st_nlink != 1
             or not size_valid
             or not self._matches_reserved_path()
@@ -170,12 +155,10 @@ class ReceiptReservation:
             metadata = os.lstat(self.path)
         except OSError:
             return False
-        attributes = getattr(metadata, "st_file_attributes", 0)
         return (
             stat.S_ISREG(metadata.st_mode)
-            and not stat.S_ISLNK(metadata.st_mode)
-            and not bool(attributes & _REPARSE_POINT)
-            and (metadata.st_dev, metadata.st_ino) == self._identity
+            and not is_link_or_reparse(metadata)
+            and identity(metadata) == self._identity
         )
 
     def _close_quietly(self) -> None:
@@ -250,25 +233,13 @@ def reserve_receipt(path: Path) -> ReceiptReservation:
 
 def _is_windows_reserved_leaf(leaf: str) -> bool:
     stem = leaf.rstrip(" .").split(".", 1)[0].upper()
-    return stem in _WINDOWS_RESERVED_NAMES
+    return stem in WINDOWS_RESERVED_NAMES
 
 
 def _existing_directory_without_links(path: Path) -> Path:
-    """Resolve an existing directory only after every ancestor passes no-follow checks."""
-    absolute = Path(os.path.abspath(path))
-    current = Path(absolute.anchor)
-    components = absolute.parts[1:] if absolute.anchor else absolute.parts
-    for component in components:
-        current /= component
-        metadata = os.lstat(current)
-        attributes = getattr(metadata, "st_file_attributes", 0)
-        if (
-            not stat.S_ISDIR(metadata.st_mode)
-            or stat.S_ISLNK(metadata.st_mode)
-            or bool(attributes & _REPARSE_POINT)
-        ):
-            raise OSError("unsafe directory ancestor")
-    return absolute.resolve(strict=True)
+    if not has_safe_directory_chain(path):
+        raise OSError("unsafe directory ancestor")
+    return Path(os.path.abspath(path)).resolve(strict=True)
 
 
 def write_new_receipt(path: Path, payload: dict[str, Any]) -> None:
@@ -290,17 +261,15 @@ def read_receipt(
     """Read one bounded, regular receipt and validate its public envelope."""
     try:
         metadata = os.lstat(path)
-        attributes = getattr(metadata, "st_file_attributes", 0)
         if (
             not stat.S_ISREG(metadata.st_mode)
-            or stat.S_ISLNK(metadata.st_mode)
-            or bool(attributes & _REPARSE_POINT)
+            or is_link_or_reparse(metadata)
             or not 0 < metadata.st_size <= MAX_RECEIPT_BYTES
         ):
             raise OSError
         with path.open("rb") as stream:
             opened = os.fstat(stream.fileno())
-            if (metadata.st_dev, metadata.st_ino) != (opened.st_dev, opened.st_ino):
+            if identity(metadata) != identity(opened):
                 raise OSError
             data = stream.read(MAX_RECEIPT_BYTES + 1)
     except OSError as exc:

@@ -13,6 +13,7 @@ import pytest
 
 from ios_rehydrate import device
 from ios_rehydrate.errors import RehydrateError
+from ios_rehydrate.privacy import device_reference
 
 
 def _serial(label: str) -> str:
@@ -103,7 +104,7 @@ def test_open_device_requires_unique_explicit_selector_and_closes(
         selected_ref = next(
             item["device_ref"]
             for item in evidence
-            if item["device_ref"] == device._device_ref(_serial("synthetic-alpha"))
+            if item["device_ref"] == device_reference(_serial("synthetic-alpha"))
         )
         close_status = device.DeviceCloseStatus()
         async with device.open_device(selected_ref, close_status=close_status) as opened:
@@ -240,7 +241,7 @@ def test_reference_and_duplicate_full_serial_must_be_unique(
     async def exercise() -> None:
         for selector in (
             _serial("synthetic-duplicate"),
-            device._device_ref(_serial("synthetic-duplicate")),
+            device_reference(_serial("synthetic-duplicate")),
         ):
             with pytest.raises(RehydrateError) as error:
                 async with device.open_device(selector):
@@ -260,7 +261,7 @@ def test_truncated_reference_does_not_select_a_device(
     monkeypatch.setattr(device, "list_mux_devices", fake_list)
 
     async def exercise() -> None:
-        reference = device._device_ref(_serial("synthetic-only"))
+        reference = device_reference(_serial("synthetic-only"))
         with pytest.raises(RehydrateError) as error:
             async with device.open_device(reference[:-1]):
                 pytest.fail("a truncated reference must never open a device")

@@ -12,6 +12,7 @@ from pyiosbackup.manifest_dbs.sqlite3 import MBFile
 
 from ios_rehydrate import manifest
 from ios_rehydrate.errors import RehydrateError
+from ios_rehydrate.fs import REPARSE_POINT
 
 
 def _tlv(tag: bytes, value: int | bytes) -> bytes:
@@ -564,7 +565,7 @@ def test_safe_device_root_rejects_windows_reparse_on_non_immediate_ancestor_befo
             (),
             {
                 "st_mode": metadata.st_mode,
-                "st_file_attributes": manifest._REPARSE_POINT,
+                "st_file_attributes": REPARSE_POINT,
             },
         )()
 

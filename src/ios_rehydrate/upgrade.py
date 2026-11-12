@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 iOS Rehydrate contributors
-"""Single-purpose, guarded installation-proxy Upgrade operation."""
+"""Stage the IPA and send InstallationProxy ``Upgrade`` for one placeholder app."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pymobiledevice3.lockdown_service_provider import LockdownServiceProvider
 from pymobiledevice3.services.afc import AfcService
 from pymobiledevice3.services.installation_proxy import InstallationProxyService
 
-from ios_rehydrate.apps import AppSnapshot, AppState, inspect_app
+from ios_rehydrate.apps import AppSnapshot, AppState, inspect_app, is_rehydratable
 from ios_rehydrate.errors import ExitCode, OutcomeUnknownError, RehydrateError
 from ios_rehydrate.ipa import ValidatedIPA
 
@@ -25,10 +25,6 @@ _CLEANUP_TIMEOUT_SECONDS = 15.0
 _POSTFLIGHT_ATTEMPTS = 3
 _POSTFLIGHT_DELAY_SECONDS = 0.25
 _POSTFLIGHT_INSPECT_TIMEOUT_SECONDS = 15.0
-
-
-def _eligible_target(snapshot: AppSnapshot) -> bool:
-    return snapshot.state is AppState.PLACEHOLDER and (snapshot.placeholder or snapshot.demoted)
 
 
 def _postflight_matches(snapshot: AppSnapshot, payload: ValidatedIPA) -> bool:
@@ -125,7 +121,7 @@ async def rehydrate_app(
             code=ExitCode.DEVICE_UNAVAILABLE,
             reason="APP_PREFLIGHT_TIMEOUT",
         ) from None
-    if not _eligible_target(before):
+    if not is_rehydratable(before):
         raise RehydrateError(
             "target is not an exact User placeholder or demoted app",
             code=ExitCode.POLICY_REFUSED,
@@ -158,7 +154,7 @@ async def rehydrate_app(
                         code=ExitCode.DEVICE_UNAVAILABLE,
                         reason="APP_FINAL_PREFLIGHT_TIMEOUT",
                     ) from None
-                if not _eligible_target(before_send):
+                if not is_rehydratable(before_send):
                     raise RehydrateError(
                         "target eligibility changed while the package was staged",
                         code=ExitCode.POLICY_REFUSED,

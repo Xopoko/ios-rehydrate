@@ -19,6 +19,7 @@ from pathlib import Path, PurePosixPath
 from typing import cast
 
 from ios_rehydrate.errors import ExitCode, RehydrateError
+from ios_rehydrate.fs import identity, is_link_or_reparse
 from ios_rehydrate.privacy import opaque_ref
 
 MAX_IPA_BYTES = 2 * 1024**3
@@ -30,10 +31,9 @@ MAX_PLIST_BYTES = 8 * 1024**2
 MAX_SINF_BYTES = 16 * 1024**2
 
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
-_BUNDLE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$")
+BUNDLE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$")
 _VERSION_VALUE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$")
 _MINIMUM_OS_VALUE = re.compile(r"^[0-9]+(?:\.[0-9]+)*$")
-_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _ALLOWED_COMPRESSION_METHODS = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 _EOCD_SIGNATURE = b"PK\x05\x06"
 _ZIP64_EOCD_SIGNATURE = b"PK\x06\x06"
@@ -107,21 +107,13 @@ def _read_archive(path: Path) -> bytes:
     """Read a stable-size regular file after enforcing the size cap."""
     try:
         path_metadata = os.lstat(path)
-        path_attributes = getattr(path_metadata, "st_file_attributes", 0)
-        if (
-            not stat.S_ISREG(path_metadata.st_mode)
-            or stat.S_ISLNK(path_metadata.st_mode)
-            or bool(path_attributes & _REPARSE_POINT)
-        ):
+        if not stat.S_ISREG(path_metadata.st_mode) or is_link_or_reparse(path_metadata):
             raise _invalid("IPA_NOT_REGULAR_FILE", "IPA input is not a regular file")
         with path.open("rb") as stream:
             stat_result = os.fstat(stream.fileno())
             if not stat.S_ISREG(stat_result.st_mode):
                 raise _invalid("IPA_NOT_REGULAR_FILE", "IPA input is not a regular file")
-            if (path_metadata.st_dev, path_metadata.st_ino) != (
-                stat_result.st_dev,
-                stat_result.st_ino,
-            ):
+            if identity(path_metadata) != identity(stat_result):
                 raise _invalid("IPA_FILE_CHANGED", "IPA changed while it was being opened")
             if stat_result.st_size > MAX_IPA_BYTES:
                 raise _invalid("IPA_FILE_TOO_LARGE", "IPA exceeds the 2 GiB size limit")
@@ -1051,9 +1043,9 @@ def _validate_zip(
             "IPA_METADATA_BUNDLE_MISMATCH",
             "app and iTunes metadata bundle identifiers do not match",
         )
-    if _BUNDLE_IDENTIFIER.fullmatch(bundle_identifier) is None:
+    if BUNDLE_IDENTIFIER.fullmatch(bundle_identifier) is None:
         raise _invalid("IPA_BUNDLE_ID_INVALID", "app bundle identifier is invalid")
-    if expected_bundle_id is not None and _BUNDLE_IDENTIFIER.fullmatch(expected_bundle_id) is None:
+    if expected_bundle_id is not None and BUNDLE_IDENTIFIER.fullmatch(expected_bundle_id) is None:
         raise _invalid("IPA_EXPECTED_BUNDLE_INVALID", "expected app identifier is invalid")
     if expected_bundle_id is not None and bundle_identifier != expected_bundle_id:
         raise _invalid(

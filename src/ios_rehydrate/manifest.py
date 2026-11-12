@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 iOS Rehydrate contributors
-"""Privacy-preserving, in-memory inspection of an encrypted Manifest.db."""
+"""Decrypt Manifest.db in memory and summarize one app domain."""
 
 from __future__ import annotations
 
@@ -22,11 +22,11 @@ from pyiosbackup.manifest_dbs.sqlite3 import MBFile  # type: ignore[import-untyp
 from pyiosbackup.manifest_plist import ManifestPlist  # type: ignore[import-untyped]
 
 from ios_rehydrate.errors import ExitCode, RehydrateError
+from ios_rehydrate.fs import has_safe_directory_chain, is_link_or_reparse
+from ios_rehydrate.ipa import BUNDLE_IDENTIFIER
 
 _AES_BLOCK_BYTES = 16
 _SQLITE_HEADER = b"SQLite format 3\x00"
-_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-_BUNDLE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$")
 _KEYBAG_TAG = re.compile(rb"[A-Z0-9]{4}")
 _REQUIRED_COLUMNS = {
     "fileid": "TEXT",
@@ -36,9 +36,7 @@ _REQUIRED_COLUMNS = {
     "file": "BLOB",
 }
 
-# Resource ceilings for attacker-controlled backup metadata.  A 4 MiB keybag
-# plist and 512 MiB encrypted SQLite database are deliberately generous for
-# their formats while keeping the all-in-memory decrypt path finite.
+# The whole database is decrypted in memory, so cap it.
 MAX_MANIFEST_PLIST_BYTES = 4 * 1024 * 1024
 MAX_MANIFEST_DB_BYTES = 512 * 1024 * 1024
 
@@ -97,7 +95,7 @@ def probe_app_domain(
     SQLite may retain internal immutable copies, so this is best-effort memory
     hygiene rather than a hard memory-erasure guarantee.
     """
-    if type(bundle_id) is not str or _BUNDLE_IDENTIFIER.fullmatch(bundle_id) is None:
+    if type(bundle_id) is not str or BUNDLE_IDENTIFIER.fullmatch(bundle_id) is None:
         raise _manifest_error("runtime bundle identifier is invalid", "MANIFEST_BUNDLE_INVALID")
     root = _safe_device_root(device_root)
     manifest_path = _required_file(
@@ -539,24 +537,12 @@ def _invalid_key_material() -> RehydrateError:
 
 
 def _safe_device_root(path: Path) -> Path:
-    raw = Path(path)
-    try:
-        absolute = raw.absolute()
-    except OSError as exc:
+    if not has_safe_directory_chain(path):
         raise _manifest_error(
-            "backup device directory is missing", "MANIFEST_PATH_INVALID"
-        ) from exc
-    for component in (*reversed(absolute.parents), absolute):
-        try:
-            metadata = os.lstat(component)
-        except OSError as exc:
-            raise _manifest_error(
-                "backup device directory is missing", "MANIFEST_PATH_INVALID"
-            ) from exc
-        if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(metadata):
-            raise _manifest_error("backup device directory is unsafe", "MANIFEST_PATH_INVALID")
+            "backup device directory is missing or unsafe", "MANIFEST_PATH_INVALID"
+        )
     try:
-        return absolute.resolve(strict=True)
+        return Path(path).resolve(strict=True)
     except OSError as exc:
         raise _manifest_error(
             "backup device directory is unreadable", "MANIFEST_PATH_INVALID"
@@ -574,7 +560,7 @@ def _required_file(
         metadata = os.lstat(path)
     except OSError as exc:
         raise _manifest_error("required manifest metadata is missing", invalid_reason) from exc
-    if not stat.S_ISREG(metadata.st_mode) or _is_reparse(metadata) or metadata.st_size <= 0:
+    if not stat.S_ISREG(metadata.st_mode) or is_link_or_reparse(metadata) or metadata.st_size <= 0:
         raise _manifest_error("required manifest metadata is unsafe or empty", invalid_reason)
     if metadata.st_size > size_limit:
         raise _manifest_error("required manifest metadata is too large", too_large_reason)
@@ -592,7 +578,11 @@ def _read_bounded_file(
     try:
         with path.open("rb") as stream:
             metadata = os.fstat(stream.fileno())
-            if not stat.S_ISREG(metadata.st_mode) or _is_reparse(metadata) or metadata.st_size <= 0:
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or is_link_or_reparse(metadata)
+                or metadata.st_size <= 0
+            ):
                 raise _manifest_error("required manifest metadata is unsafe", invalid_reason)
             if metadata.st_size > size_limit:
                 raise _manifest_error("required manifest metadata is too large", too_large_reason)
@@ -619,15 +609,14 @@ def _reject_pending_journal(root: Path) -> None:
             raise _manifest_error(
                 "manifest journal state is unreadable", "MANIFEST_JOURNAL_INVALID"
             ) from exc
-        if _is_reparse(metadata) or not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 0:
+        if (
+            is_link_or_reparse(metadata)
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size > 0
+        ):
             raise _manifest_error(
                 "manifest has pending or unsafe journal state", "MANIFEST_JOURNAL_INVALID"
             )
-
-
-def _is_reparse(metadata: os.stat_result) -> bool:
-    attributes = getattr(metadata, "st_file_attributes", 0)
-    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & _REPARSE_POINT)
 
 
 def _wipe(value: bytearray) -> None:

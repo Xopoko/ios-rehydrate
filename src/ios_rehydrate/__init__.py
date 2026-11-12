@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 iOS Rehydrate contributors
-"""iOS Rehydrate public package."""
+"""Restore offloaded iOS apps from a local IPA."""
 
 from __future__ import annotations
 

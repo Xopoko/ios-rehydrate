@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 iOS Rehydrate contributors
-"""Public command-line interface for the guarded rehydration workflow."""
+"""Command-line interface."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from typer._click.exceptions import ClickException as TyperClickException
 from typer._click.exceptions import Exit as TyperClickExit
 
 from ios_rehydrate import __version__
-from ios_rehydrate.apps import AppState, inspect_app
+from ios_rehydrate.apps import inspect_app, is_rehydratable
 from ios_rehydrate.backup import (
     BackupReport,
     create_backup,
@@ -34,7 +34,7 @@ from ios_rehydrate.backup import (
 )
 from ios_rehydrate.device import DeviceCloseStatus, list_devices, open_device
 from ios_rehydrate.errors import ExitCode, OutcomeUnknownError, RehydrateError
-from ios_rehydrate.ipa import public_summary, validate_ipa
+from ios_rehydrate.ipa import BUNDLE_IDENTIFIER, public_summary, validate_ipa
 from ios_rehydrate.manifest import probe_app_domain
 from ios_rehydrate.privacy import device_reference, opaque_ref, sanitize_text
 from ios_rehydrate.receipts import (
@@ -48,25 +48,21 @@ from ios_rehydrate.upgrade import rehydrate_app
 
 app = typer.Typer(
     name="ios-rehydrate",
-    help="Guarded rehydration of an existing iOS placeholder from a local IPA.",
+    help="Restore an offloaded iOS app from a local IPA.",
     no_args_is_help=True,
     pretty_exceptions_enable=False,
     add_completion=False,
 )
-device_app = typer.Typer(help="Discover explicitly selected USB devices.", no_args_is_help=True)
+device_app = typer.Typer(help="List connected USB devices.", no_args_is_help=True)
 target_app = typer.Typer(help="Inspect or rehydrate one existing app.", no_args_is_help=True)
 backup_app = typer.Typer(help="Create and verify encrypted backups.", no_args_is_help=True)
-ipa_app = typer.Typer(
-    help="Validate a local IPA and the App Store metadata required by this workflow.",
-    no_args_is_help=True,
-)
+ipa_app = typer.Typer(help="Validate a local IPA.", no_args_is_help=True)
 
 app.add_typer(device_app, name="device")
 app.add_typer(target_app, name="app")
 app.add_typer(backup_app, name="backup")
 app.add_typer(ipa_app, name="ipa")
 
-_BUNDLE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 DeviceOption = Annotated[
@@ -106,10 +102,6 @@ def root_callback(
     ] = False,
 ) -> None:
     del version
-
-
-def _run(awaitable: Any) -> Any:
-    return asyncio.run(awaitable)
 
 
 def _emit(payload: dict[str, Any], *, compact: bool) -> None:
@@ -157,7 +149,7 @@ def _finalize_optional_receipt(
 
 
 def _require_bundle_identifier(bundle_id: str) -> str:
-    if _BUNDLE_IDENTIFIER.fullmatch(bundle_id) is None:
+    if BUNDLE_IDENTIFIER.fullmatch(bundle_id) is None:
         raise RehydrateError(
             "bundle identifier is invalid",
             code=ExitCode.USAGE,
@@ -298,12 +290,12 @@ def _validate_backup_creation_receipt(
 
 @app.command("doctor")
 def doctor(json_output: JsonOption = False) -> None:
-    """Report a redacted runtime/dependency readiness snapshot."""
+    """Show host, dependency, and usbmux status."""
     package_names = ("pymobiledevice3", "pyiosbackup", "typer")
     packages = {name: importlib.metadata.version(name) for name in package_names}
     usbmux_available = True
     try:
-        connected = len(_run(list_devices()))
+        connected = len(asyncio.run(list_devices()))
     except RehydrateError:
         usbmux_available = False
         connected = 0
@@ -324,7 +316,7 @@ def doctor(json_output: JsonOption = False) -> None:
 
 @app.command("licenses")
 def licenses(json_output: JsonOption = False) -> None:
-    """Show the concise license and no-warranty notice."""
+    """Show license and warranty information."""
     _emit(
         {
             "project_license": "GPL-3.0-or-later",
@@ -341,7 +333,7 @@ def licenses(json_output: JsonOption = False) -> None:
 @device_app.command("list")
 def device_list(json_output: JsonOption = False) -> None:
     """List connected USB devices without printing raw identifiers or names."""
-    devices = _run(list_devices())
+    devices = asyncio.run(list_devices())
     _emit({"devices": devices, "count": len(devices)}, compact=json_output)
 
 
@@ -360,7 +352,7 @@ def app_inspect(
             evidence = (await inspect_app(lockdown, bundle_id)).to_evidence()
         return {**evidence, "connection_closed": close_status.closed}
 
-    _emit({"app": _run(operation())}, compact=json_output)
+    _emit({"app": asyncio.run(operation())}, compact=json_output)
 
 
 @backup_app.command("encryption-status")
@@ -368,7 +360,7 @@ def backup_encryption_status(
     device: DeviceOption,
     json_output: JsonOption = False,
 ) -> None:
-    """Read the authoritative backup-encryption state."""
+    """Show whether backup encryption is enabled on the device."""
 
     async def operation() -> dict[str, object]:
         close_status = DeviceCloseStatus()
@@ -380,7 +372,7 @@ def backup_encryption_status(
             }
         return {**evidence, "connection_closed": close_status.closed}
 
-    _emit({"backup_encryption": _run(operation())}, compact=json_output)
+    _emit({"backup_encryption": asyncio.run(operation())}, compact=json_output)
 
 
 @backup_app.command("create")
@@ -449,7 +441,7 @@ def backup_create(
         }
 
     try:
-        evidence = {"backup": _run(operation())}
+        evidence = {"backup": asyncio.run(operation())}
     except BaseException:
         _abort_failed_optional_receipt(reservation)
         raise
@@ -505,7 +497,7 @@ def backup_verify(
         return udid, device_ref, close_status.closed
 
     try:
-        udid, device_ref, connection_closed = _run(selected_identity())
+        udid, device_ref, connection_closed = asyncio.run(selected_identity())
         report = validate_backup(backup_root, udid)
         if report.device_ref != device_ref:
             raise RehydrateError(
@@ -629,10 +621,7 @@ def app_rehydrate(
                 device_ref=device_ref,
                 app_ref=app_ref,
             )
-            snapshot = await inspect_app(lockdown, bundle_id)
-            if snapshot.state is not AppState.PLACEHOLDER or not (
-                snapshot.placeholder or snapshot.demoted
-            ):
+            if not is_rehydratable(await inspect_app(lockdown, bundle_id)):
                 raise RehydrateError(
                     "target is not an exact User placeholder or demoted app",
                     code=ExitCode.POLICY_REFUSED,
@@ -697,7 +686,7 @@ def app_rehydrate(
             expected_bundle_id=bundle_id,
             expected_store_id=store_id,
         )
-        evidence = {"rehydration": _run(operation())}
+        evidence = {"rehydration": asyncio.run(operation())}
     except OutcomeUnknownError:
         if unknown_evidence is not None:
             unknown_evidence["connection_closed"] = close_status.closed
